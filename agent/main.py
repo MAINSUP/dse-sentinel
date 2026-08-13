@@ -32,6 +32,106 @@ UNIT_MAP = {
     "SeaVie API": "seavie-api.service",
 }
 
+# Services that Sentinel is allowed to control.
+# PM2 services are controlled through the mainsup user's PM2 environment.
+CONTROLLED_SERVICES = {
+    "MIA Web": {
+        "type": "pm2",
+        "pm2_name": "mia-web",
+    },
+    "MIA API": {
+        "type": "pm2",
+        "pm2_name": "mia-api",
+    },
+    "SeaVie API": {
+        "type": "pm2",
+        "pm2_name": "seavie-api",
+    },
+    "SeaVie Web": {
+        "type": "pm2",
+        "pm2_name": "seavie-web",
+    },
+    "Sentinel API": {
+        "type": "systemd",
+        "unit": "sentinel-api.service",
+    },
+    "Sentinel Web": {
+        "type": "systemd",
+        "unit": "sentinel-web.service",
+    },
+}
+
+
+MOBILE_APPS = {
+    "MIA Mobile": {
+        "project_dir": "/home/mainsup/projects/MIA/mobile",
+        "build_command": [
+            "eas",
+            "build",
+            "--platform",
+            "all",
+            "--profile",
+            "production",
+            "--non-interactive",
+        ],
+        "deploy_command": [
+            "eas",
+            "build",
+            "--platform",
+            "all",
+            "--profile",
+            "production",
+            "--auto-submit",
+            "--non-interactive",
+        ],
+    },
+}
+
+
+mobile_jobs = {}
+mobile_jobs_lock = threading.Lock()
+
+
+def run_mobile_job(job_id: str, app_name: str, deploy: bool):
+    app = MOBILE_APPS[app_name]
+
+    command = app["deploy_command"] if deploy else app["build_command"]
+
+    with mobile_jobs_lock:
+        mobile_jobs[job_id]["status"] = "running"
+
+    try:
+        result = subprocess.run(
+            command,
+            cwd=app["project_dir"],
+            capture_output=True,
+            text=True,
+            timeout=7200,
+            check=False,
+        )
+
+        with mobile_jobs_lock:
+            mobile_jobs[job_id].update({
+                "status": "success" if result.returncode == 0 else "failed",
+                "return_code": result.returncode,
+                "stdout": result.stdout[-10000:],
+                "stderr": result.stderr[-10000:],
+            })
+
+    except subprocess.TimeoutExpired:
+        with mobile_jobs_lock:
+            mobile_jobs[job_id].update({
+                "status": "timeout",
+            })
+
+    except Exception as exc:
+        with mobile_jobs_lock:
+            mobile_jobs[job_id].update({
+                "status": "failed",
+                "error": str(exc),
+            })
+
+
 # ==========================================
 # COLLECTORS
 # ==========================================
@@ -215,6 +315,71 @@ def collect_deployment_state() -> Dict[str, Any]:
         "status": "synced",
         "last_check": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+
+def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
+    """
+    Execute a strictly allow-listed service control action.
+    Never pass arbitrary user input to a shell.
+    """
+    service = CONTROLLED_SERVICES.get(service_name)
+
+    if not service:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown controlled service: {service_name}",
+        )
+
+    if action not in {"start", "stop", "restart"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported action: {action}",
+        )
+
+    try:
+        if service["type"] == "pm2":
+            command = [
+                "pm2",
+                action,
+                service["pm2_name"],
+            ]
+
+        elif service["type"] == "systemd":
+            command = [
+                "systemctl",
+                action,
+                service["unit"],
+            ]
+
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Invalid service configuration",
+            )
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        return {
+            "success": result.returncode == 0,
+            "service": service_name,
+            "action": action,
+            "stdout": result.stdout[-4000:],
+            "stderr": result.stderr[-4000:],
+            "return_code": result.returncode,
+        }
+
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=504,
+            detail=f"{action} operation timed out",
+        )
+
 
 
 class JournalCollector:
@@ -526,6 +691,11 @@ def overview():
     }
 
 
+@app.post("/api/services/{service_name}/action")
+def service_action(service_name: str, action: str = Query(...)):
+    return run_controlled_service(service_name, action)
+
+
 # ==========================================
 # DRILL-DOWN ENDPOINTS
 # ==========================================
@@ -567,6 +737,48 @@ def get_service_stats(service_name: str):
         }
     except Exception as exc:
         return {"service": clean_name, "error": str(exc), "restarts_crashes": 0}
+
+
+
+@app.post("/api/mobile/{app_name}/build")
+def mobile_build(app_name: str, deploy: bool = False):
+    if app_name not in MOBILE_APPS:
+        raise HTTPException(status_code=404, detail="Unknown mobile app")
+
+    job_id = f"{app_name.lower().replace(' ', '-')}-{int(time.time())}"
+
+    with mobile_jobs_lock:
+        mobile_jobs[job_id] = {
+            "id": job_id,
+            "app": app_name,
+            "deploy": deploy,
+            "status": "queued",
+            "started_at": time.time(),
+        }
+
+    thread = threading.Thread(
+        target=run_mobile_job,
+        args=(job_id, app_name, deploy),
+        daemon=True,
+    )
+    thread.start()
+
+    return {
+        "success": True,
+        "job_id": job_id,
+        "status": "queued",
+    }
+
+
+@app.get("/api/mobile/jobs/{job_id}")
+def mobile_job(job_id: str):
+    with mobile_jobs_lock:
+        job = mobile_jobs.get(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return job
 
 
 if __name__ == "__main__":
