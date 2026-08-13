@@ -1,0 +1,41 @@
+{
+  "last_collection": {
+    "available": true,
+    "deployments": [
+      {
+        "name": "MIA Mobile",
+        "webhook_id": "mia-mobile-update",
+        "status": "success",
+        "latest_run": {
+          "started_at": "2026-08-13T13:27:39+00:00",
+          "finished_at": "2026-08-13T13:27:40+00:00",
+          "lines": [
+            "Thu Aug 13 13:27:39 UTC 2026 - current commit:",
+            "e76d41c",
+            "From github.com:MAINSUP/mia-mobile",
+            " * branch            main       -> FETCH_HEAD",
+            "Already up to date.",
+            "Thu Aug 13 13:27:40 UTC 2026 - webhook finished"
+          ],
+          "errors": [],
+          "success": true,
+          "finished": true
+        }
+      },
+      {
+        "name": "SeaVie Mobile",
+        "webhook_id": "seavie-mobile-update",
+        "status": "stale_incomplete",
+        "latest_run": {
+          "started_at": "2026-08-02T19:41:06+00:00",
+          "finished_at": null,
+          "lines": [],
+          "errors": [],
+          "success": false,
+          "finished": false
+        }
+      }
+    ],
+    "incidents": []
+  }
+}
