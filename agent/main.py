@@ -12,6 +12,11 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from email_notifier import EmailNotifier
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -447,6 +452,22 @@ def network():
         "listening_ports": get_listening_ports(),
     }
 
+@app.post("/api/test-email")
+def test_email():
+    test_incident = {
+        "id": "manual-email-test",
+        "title": "Sentinel Email Test",
+        "severity": "critical",
+        "source": "manual",
+        "timestamp": time.time(),
+    }
+
+    success = email_notifier.send_incident(test_incident)
+
+    return {
+        "success": success
+    }
+    
 
 @app.get("/api/applications")
 def applications():
