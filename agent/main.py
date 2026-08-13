@@ -8,10 +8,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
-
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-
+from email_notifier import EmailNotifier
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -318,6 +318,7 @@ class IncidentManager:
 # SHARED STATE & BACKGROUND WORKER
 # ==========================================
 incident_manager = IncidentManager()
+email_notifier = EmailNotifier()
 latest_agent_data = {}
 
 
@@ -347,13 +348,28 @@ def run_agent_loop():
 
             # 3. Process incidents
             detections = (
-                systemd_events
-                + pm2_events
-                + network_events
-                + journal_events
-                + app_events
+             systemd_events
+             + pm2_events
+             + network_events
+             + journal_events
+             + app_events
+             )
+
+            # Remember incidents that were already active.
+            previous_incident_ids = set(
+              incident_manager.active_incidents.keys()
             )
+
             incident_events = incident_manager.process(detections)
+
+             # Send email only for newly created incidents.
+             # This prevents Sentinel from sending the same email
+              # every 5-second collection cycle.
+            for incident in incident_events:
+                incident_id = incident.get("id")
+
+                if incident_id not in previous_incident_ids:
+                   email_notifier.send_incident(incident)
 
             # 4. Update shared memory atomically
             latest_agent_data = {
