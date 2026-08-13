@@ -13,6 +13,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from email_notifier import EmailNotifier
 from dotenv import load_dotenv
+from process_baseline import ProcessBaselineMonitor
+
 
 load_dotenv()
 
@@ -326,6 +328,11 @@ incident_manager = IncidentManager()
 email_notifier = EmailNotifier()
 latest_agent_data = {}
 
+mia_process_monitor = ProcessBaselineMonitor(
+    name="mia-web",
+    cwd="/home/mainsup/projects/MIA/mia-web/mia-web-app",
+)
+
 
 def run_agent_loop():
     """Background thread loop running detections every COLLECTION_INTERVAL seconds."""
@@ -350,15 +357,22 @@ def run_agent_loop():
             network_events = check_listening_ports(ports)
             journal_events = check_journal_errors(journal)
             app_events = detect_application_failures(apps)
+                        # Process baseline monitoring
+            mia_memory = mia_process_monitor.update()
 
             # 3. Process incidents
             detections = (
-             systemd_events
-             + pm2_events
-             + network_events
-             + journal_events
-             + app_events
-             )
+                systemd_events
+                + pm2_events
+                + network_events
+                + journal_events
+                + app_events
+            )
+
+            if mia_memory.get("incident"):
+                detections.append(
+                    mia_memory["incident"]
+                )
 
             # Remember incidents that were already active.
             previous_incident_ids = set(
@@ -467,7 +481,7 @@ def test_email():
     return {
         "success": success
     }
-    
+
 
 @app.get("/api/applications")
 def applications():
@@ -506,6 +520,9 @@ def overview():
             "history": latest_agent_data.get("history", []),
         },
         "journal": latest_agent_data.get("journal", {}),
+        "process_baselines": {
+         "mia-web": mia_process_monitor.get_status()
+         },
     }
 
 
