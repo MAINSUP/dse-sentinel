@@ -8,23 +8,16 @@ import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
-from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from email_notifier import EmailNotifier
 from dotenv import load_dotenv
 from process_baseline import ProcessBaselineMonitor
 
-
 load_dotenv()
 
+COLLECTION_INTERVAL = 5
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-COLLECTION_INTERVAL = 5  # Collection cycle in seconds
-
-# Map of service names / display labels to actual systemd unit names
 UNIT_MAP = {
     "Sentinel API": "sentinel-api.service",
     "Sentinel Web": "sentinel-web.service",
@@ -32,61 +25,28 @@ UNIT_MAP = {
     "SeaVie API": "seavie-api.service",
 }
 
-# Services that Sentinel is allowed to control.
-# PM2 services are controlled through the mainsup user's PM2 environment.
 CONTROLLED_SERVICES = {
-    "MIA Web": {
-        "type": "pm2",
-        "pm2_name": "mia-web",
-    },
-    "MIA API": {
-        "type": "pm2",
-        "pm2_name": "mia-api",
-    },
-    "SeaVie API": {
-        "type": "pm2",
-        "pm2_name": "seavie-api",
-    },
-    "SeaVie Web": {
-        "type": "pm2",
-        "pm2_name": "seavie-web",
-    },
-    "Sentinel API": {
-        "type": "systemd",
-        "unit": "sentinel-api.service",
-    },
-    "Sentinel Web": {
-        "type": "systemd",
-        "unit": "sentinel-web.service",
-    },
+    "MIA Web": {"type": "pm2", "pm2_name": "mia-web"},
+    "MIA API": {"type": "pm2", "pm2_name": "mia-api"},
+    "SeaVie API": {"type": "pm2", "pm2_name": "seavie-api"},
+    "SeaVie Web": {"type": "pm2", "pm2_name": "seavie-web"},
+    "Sentinel API": {"type": "systemd", "unit": "sentinel-api.service"},
+    "Sentinel Web": {"type": "systemd", "unit": "sentinel-web.service"},
 }
-
 
 MOBILE_APPS = {
     "MIA Mobile": {
         "project_dir": "/home/mainsup/projects/MIA/mobile",
         "build_command": [
-            "eas",
-            "build",
-            "--platform",
-            "all",
-            "--profile",
-            "production",
+            "eas", "build", "--platform", "all", "--profile", "production",
             "--non-interactive",
         ],
         "deploy_command": [
-            "eas",
-            "build",
-            "--platform",
-            "all",
-            "--profile",
-            "production",
-            "--auto-submit",
-            "--non-interactive",
+            "eas", "build", "--platform", "all", "--profile", "production",
+            "--auto-submit", "--non-interactive",
         ],
     },
 }
-
 
 mobile_jobs = {}
 mobile_jobs_lock = threading.Lock()
@@ -94,12 +54,9 @@ mobile_jobs_lock = threading.Lock()
 
 def run_mobile_job(job_id: str, app_name: str, deploy: bool):
     app = MOBILE_APPS[app_name]
-
     command = app["deploy_command"] if deploy else app["build_command"]
-
     with mobile_jobs_lock:
         mobile_jobs[job_id]["status"] = "running"
-
     try:
         result = subprocess.run(
             command,
@@ -109,7 +66,6 @@ def run_mobile_job(job_id: str, app_name: str, deploy: bool):
             timeout=7200,
             check=False,
         )
-
         with mobile_jobs_lock:
             mobile_jobs[job_id].update({
                 "status": "success" if result.returncode == 0 else "failed",
@@ -117,56 +73,35 @@ def run_mobile_job(job_id: str, app_name: str, deploy: bool):
                 "stdout": result.stdout[-10000:],
                 "stderr": result.stderr[-10000:],
             })
-
     except subprocess.TimeoutExpired:
         with mobile_jobs_lock:
-            mobile_jobs[job_id].update({
-                "status": "timeout",
-            })
-
+            mobile_jobs[job_id].update({"status": "timeout"})
     except Exception as exc:
         with mobile_jobs_lock:
-            mobile_jobs[job_id].update({
-                "status": "failed",
-                "error": str(exc),
-            })
+            mobile_jobs[job_id].update({"status": "failed", "error": str(exc)})
 
 
-# ==========================================
-# COLLECTORS
-# ==========================================
 def get_system_info() -> Dict[str, Any]:
-    """Collects host-level system metrics (CPU, Memory, Disk)."""
     cpu_usage = psutil.cpu_percent(interval=None)
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
-    boot_time = psutil.boot_time()
-    uptime = time.time() - boot_time
-
+    uptime = time.time() - psutil.boot_time()
     return {
         "hostname": socket.gethostname(),
-        "cpu": {
-            "percent": cpu_usage,
-            "count": psutil.cpu_count(),
-        },
+        "cpu": {"percent": cpu_usage, "count": psutil.cpu_count()},
         "memory": {
-            "total": mem.total,
-            "available": mem.available,
-            "used": mem.used,
-            "percent": mem.percent,
+            "total": mem.total, "available": mem.available,
+            "used": mem.used, "percent": mem.percent,
         },
         "disk": {
-            "total": disk.total,
-            "used": disk.used,
-            "free": disk.free,
-            "percent": disk.percent,
+            "total": disk.total, "used": disk.used,
+            "free": disk.free, "percent": disk.percent,
         },
         "uptime_seconds": uptime,
     }
 
 
 def get_top_processes(limit: int = 10) -> List[Dict[str, Any]]:
-    """Retrieves high resource-consuming processes running on the machine."""
     procs = []
     for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_percent']):
         try:
@@ -180,36 +115,31 @@ def get_top_processes(limit: int = 10) -> List[Dict[str, Any]]:
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
-
     procs.sort(key=lambda x: (x['cpu_percent'] or 0, x['memory_percent'] or 0), reverse=True)
     return procs[:limit]
 
 
 def get_systemd_services() -> List[Dict[str, Any]]:
-    """Fetches systemd unit statuses via systemctl."""
     services = []
     try:
-        cmd = ["systemctl", "list-units", "--type=service", "--all", "--no-pager", "--no-legend"]
-        output = subprocess.check_output(cmd, text=True)
-        
+        output = subprocess.check_output(
+            ["systemctl", "list-units", "--type=service", "--all", "--no-pager", "--no-legend"],
+            text=True,
+        )
         for line in output.strip().split("\n"):
             if not line:
                 continue
             parts = line.split(None, 4)
             if len(parts) >= 4:
-                unit = parts[0]
-                load = parts[1]
-                active = parts[2]
-                sub = parts[3]
+                unit, load, active, sub = parts[:4]
                 desc = parts[4] if len(parts) > 4 else ""
-                
                 services.append({
                     "name": unit,
                     "load": load,
                     "active_state": active,
                     "sub_state": sub,
                     "description": desc,
-                    "status": "running" if active == "active" else "failed" if active == "failed" else "stopped"
+                    "status": "running" if active == "active" else "failed" if active == "failed" else "stopped",
                 })
     except Exception as exc:
         print(f"[Collector Error] systemd services check failed: {exc}")
@@ -217,28 +147,22 @@ def get_systemd_services() -> List[Dict[str, Any]]:
 
 
 def get_pm2_processes() -> List[Dict[str, Any]]:
-    """Retrieves PM2 managed process states if PM2 is present."""
     try:
-        cmd = ["pm2", "jlist"]
-        output = subprocess.check_output(cmd, text=True)
+        output = subprocess.check_output(["pm2", "jlist"], text=True)
         data = json.loads(output)
-        processes = []
-        for p in data:
-            processes.append({
-                "name": p.get("name"),
-                "pm_id": p.get("pm_id"),
-                "status": p.get("pm2_env", {}).get("status"),
-                "cpu": p.get("monit", {}).get("cpu"),
-                "memory": p.get("monit", {}).get("memory"),
-                "restarts": p.get("pm2_env", {}).get("restart_time"),
-            })
-        return processes
+        return [{
+            "name": p.get("name"),
+            "pm_id": p.get("pm_id"),
+            "status": p.get("pm2_env", {}).get("status"),
+            "cpu": p.get("monit", {}).get("cpu"),
+            "memory": p.get("monit", {}).get("memory"),
+            "restarts": p.get("pm2_env", {}).get("restart_time"),
+        } for p in data]
     except Exception:
         return []
 
 
 def get_network_info() -> Dict[str, Any]:
-    """Retrieves general network counters."""
     net_io = psutil.net_io_counters()
     return {
         "bytes_sent": net_io.bytes_sent,
@@ -249,7 +173,6 @@ def get_network_info() -> Dict[str, Any]:
 
 
 def get_listening_ports() -> List[Dict[str, Any]]:
-    """Retrieves active network listening ports on the host."""
     listening = []
     try:
         for conn in psutil.net_connections(kind='inet'):
@@ -266,7 +189,7 @@ def get_listening_ports() -> List[Dict[str, Any]]:
                     "ip": conn.laddr.ip,
                     "address": laddr,
                     "pid": conn.pid,
-                    "process_name": proc_name
+                    "process_name": proc_name,
                 })
     except Exception as exc:
         print(f"[Collector Error] listening ports check failed: {exc}")
@@ -274,28 +197,22 @@ def get_listening_ports() -> List[Dict[str, Any]]:
 
 
 def collect_applications() -> List[Dict[str, Any]]:
-    """Collects mapped key application/service information."""
     apps = []
     for display_name, unit_name in UNIT_MAP.items():
         app_data = {
-            "name": display_name,
-            "unit": unit_name,
-            "status": "unknown",
-            "active_state": "unknown",
-            "sub_state": "unknown",
-            "pid": None,
-            "restarts": 0
+            "name": display_name, "unit": unit_name, "status": "unknown",
+            "active_state": "unknown", "sub_state": "unknown", "pid": None, "restarts": 0,
         }
         try:
-            cmd = ["systemctl", "show", unit_name, "--property=ActiveState,SubState,MainPID,NRestarts"]
-            output = subprocess.check_output(cmd, text=True)
+            output = subprocess.check_output(
+                ["systemctl", "show", unit_name, "--property=ActiveState,SubState,MainPID,NRestarts"],
+                text=True,
+            )
             props = dict(line.split("=", 1) for line in output.strip().split("\n") if "=" in line)
-            
             app_data["active_state"] = props.get("ActiveState", "unknown")
             app_data["sub_state"] = props.get("SubState", "unknown")
             app_data["pid"] = int(props.get("MainPID", 0))
             app_data["restarts"] = int(props.get("NRestarts", 0))
-            
             if app_data["active_state"] == "active":
                 app_data["status"] = "healthy"
             elif app_data["active_state"] == "failed":
@@ -304,13 +221,11 @@ def collect_applications() -> List[Dict[str, Any]]:
                 app_data["status"] = "stopped"
         except Exception:
             app_data["status"] = "error"
-            
         apps.append(app_data)
     return apps
 
 
 def collect_deployment_state() -> Dict[str, Any]:
-    """Retrieves deployment state metadata."""
     return {
         "status": "synced",
         "last_check": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -318,53 +233,19 @@ def collect_deployment_state() -> Dict[str, Any]:
 
 
 def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
-    """
-    Execute a strictly allow-listed service control action.
-    Never pass arbitrary user input to a shell.
-    """
     service = CONTROLLED_SERVICES.get(service_name)
-
     if not service:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Unknown controlled service: {service_name}",
-        )
-
+        raise HTTPException(status_code=404, detail=f"Unknown controlled service: {service_name}")
     if action not in {"start", "stop", "restart"}:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported action: {action}",
-        )
-
+        raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
     try:
         if service["type"] == "pm2":
-            command = [
-                "pm2",
-                action,
-                service["pm2_name"],
-            ]
-
+            command = ["pm2", action, service["pm2_name"]]
         elif service["type"] == "systemd":
-            command = [
-                "systemctl",
-                action,
-                service["unit"],
-            ]
-
+            command = ["systemctl", action, service["unit"]]
         else:
-            raise HTTPException(
-                status_code=500,
-                detail="Invalid service configuration",
-            )
-
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-
+            raise HTTPException(status_code=500, detail="Invalid service configuration")
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
         return {
             "success": result.returncode == 0,
             "service": service_name,
@@ -373,122 +254,85 @@ def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
             "stderr": result.stderr[-4000:],
             "return_code": result.returncode,
         }
-
     except subprocess.TimeoutExpired:
-        raise HTTPException(
-            status_code=504,
-            detail=f"{action} operation timed out",
-        )
-
+        raise HTTPException(status_code=504, detail=f"{action} operation timed out")
 
 
 class JournalCollector:
-    """Collects recent log entries from systemd journal."""
     def collect(self, lines: int = 50) -> Dict[str, Any]:
         try:
-            cmd = ["journalctl", "-p", "3", "-n", str(lines), "--no-pager", "-o", "json"]
-            output = subprocess.check_output(cmd, text=True)
+            output = subprocess.check_output(
+                ["journalctl", "-p", "3", "-n", str(lines), "--no-pager", "-o", "json"],
+                text=True,
+            )
             entries = [json.loads(line) for line in output.strip().split("\n") if line]
             return {"errors_count": len(entries), "entries": entries}
         except Exception:
             return {"errors_count": 0, "entries": []}
 
 
-# ==========================================
-# DETECTORS & INCIDENT MANAGEMENT
-# ==========================================
 class DetectionEngine:
-    def check_systemd_services(self, services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        events = []
-        for svc in services:
-            if svc.get("status") == "failed":
-                events.append({
-                    "id": f"systemd-{svc['name']}",
-                    "title": f"Service Failed: {svc['name']}",
-                    "severity": "critical",
-                    "source": "systemd",
-                    "timestamp": time.time(),
-                })
-        return events
+    def check_systemd_services(self, services):
+        return [{
+            "id": f"systemd-{svc['name']}",
+            "title": f"Service Failed: {svc['name']}",
+            "severity": "critical", "source": "systemd", "timestamp": time.time(),
+        } for svc in services if svc.get("status") == "failed"]
 
-    def check_pm2_processes(self, processes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        events = []
-        for proc in processes:
-            if proc.get("status") in ["errored", "stopped"]:
-                events.append({
-                    "id": f"pm2-{proc['name']}",
-                    "title": f"PM2 Process Issue: {proc['name']}",
-                    "severity": "warning",
-                    "source": "pm2",
-                    "timestamp": time.time(),
-                })
-        return events
+    def check_pm2_processes(self, processes):
+        return [{
+            "id": f"pm2-{proc['name']}",
+            "title": f"PM2 Process Issue: {proc['name']}",
+            "severity": "warning", "source": "pm2", "timestamp": time.time(),
+        } for proc in processes if proc.get("status") in ["errored", "stopped"]]
 
 
-def check_listening_ports(ports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def check_listening_ports(ports):
     return []
 
 
-def check_journal_errors(journal: Dict[str, Any]) -> List[Dict[str, Any]]:
-    events = []
+def check_journal_errors(journal):
     if journal.get("errors_count", 0) > 10:
-        events.append({
+        return [{
             "id": "journal-high-errors",
             "title": "High system log error frequency detected",
-            "severity": "warning",
-            "source": "journalctl",
-            "timestamp": time.time(),
-        })
-    return events
+            "severity": "warning", "source": "journalctl", "timestamp": time.time(),
+        }]
+    return []
 
 
-def detect_application_failures(apps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    events = []
-    for app in apps:
-        if app.get("status") == "failed":
-            events.append({
-                "id": f"app-{app['name']}",
-                "title": f"Application Failure: {app['name']}",
-                "severity": "critical",
-                "source": "application",
-                "timestamp": time.time(),
-            })
-    return events
+def detect_application_failures(apps):
+    return [{
+        "id": f"app-{app['name']}",
+        "title": f"Application Failure: {app['name']}",
+        "severity": "critical", "source": "application", "timestamp": time.time(),
+    } for app in apps if app.get("status") == "failed"]
 
 
 class IncidentManager:
-    """Manages active incidents and keeps a record of resolved ones."""
     def __init__(self):
         self.active_incidents = {}
         self.history = []
 
-    def process(self, detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def process(self, detections):
         current_ids = {d["id"] for d in detections}
-        
-        # Resolve cleared incidents
         for inc_id in list(self.active_incidents.keys()):
             if inc_id not in current_ids:
                 resolved_inc = self.active_incidents.pop(inc_id)
                 resolved_inc["resolved_at"] = time.time()
                 self.history.append(resolved_inc)
-
-        # Add or update current incidents
         for det in detections:
             if det["id"] not in self.active_incidents:
                 self.active_incidents[det["id"]] = det
-
         return list(self.active_incidents.values())
 
-    def get_active(self) -> List[Dict[str, Any]]:
+    def get_active(self):
         return list(self.active_incidents.values())
 
-    def get_history(self) -> List[Dict[str, Any]]:
+    def get_history(self):
         return self.history
 
 
-# ==========================================
-# SHARED STATE & BACKGROUND WORKER
-# ==========================================
 incident_manager = IncidentManager()
 email_notifier = EmailNotifier()
 latest_agent_data = {}
@@ -500,62 +344,32 @@ mia_process_monitor = ProcessBaselineMonitor(
 
 
 def run_agent_loop():
-    """Background thread loop running detections every COLLECTION_INTERVAL seconds."""
     global latest_agent_data
     detector = DetectionEngine()
     journal_collector = JournalCollector()
-
     print("[Sentinel Background Agent] Daemon thread started successfully.")
-
     while True:
         try:
-            # 1. Collect raw states
             systemd_svcs = get_systemd_services()
             pm2_svcs = get_pm2_processes()
             ports = get_listening_ports()
             journal = journal_collector.collect()
             apps = collect_applications()
-
-            # 2. Run detections
-            systemd_events = detector.check_systemd_services(systemd_svcs)
-            pm2_events = detector.check_pm2_processes(pm2_svcs)
-            network_events = check_listening_ports(ports)
-            journal_events = check_journal_errors(journal)
-            app_events = detect_application_failures(apps)
-                        # Process baseline monitoring
-            mia_memory = mia_process_monitor.update()
-
-            # 3. Process incidents
             detections = (
-                systemd_events
-                + pm2_events
-                + network_events
-                + journal_events
-                + app_events
+                detector.check_systemd_services(systemd_svcs)
+                + detector.check_pm2_processes(pm2_svcs)
+                + check_listening_ports(ports)
+                + check_journal_errors(journal)
+                + detect_application_failures(apps)
             )
-
+            mia_memory = mia_process_monitor.update()
             if mia_memory.get("incident"):
-                detections.append(
-                    mia_memory["incident"]
-                )
-
-            # Remember incidents that were already active.
-            previous_incident_ids = set(
-              incident_manager.active_incidents.keys()
-            )
-
+                detections.append(mia_memory["incident"])
+            previous_incident_ids = set(incident_manager.active_incidents.keys())
             incident_events = incident_manager.process(detections)
-
-             # Send email only for newly created incidents.
-             # This prevents Sentinel from sending the same email
-              # every 5-second collection cycle.
             for incident in incident_events:
-                incident_id = incident.get("id")
-
-                if incident_id not in previous_incident_ids:
-                   email_notifier.send_incident(incident)
-
-            # 4. Update shared memory atomically
+                if incident.get("id") not in previous_incident_ids:
+                    email_notifier.send_incident(incident)
             latest_agent_data = {
                 "active_incidents": incident_manager.get_active(),
                 "events": incident_events,
@@ -565,45 +379,27 @@ def run_agent_loop():
             }
         except Exception as err:
             print(f"[Sentinel Background Agent Error] {err}")
-
-        # Use standard thread sleep (NOT asyncio.sleep)
         time.sleep(COLLECTION_INTERVAL)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Launch agent thread
     agent_thread = threading.Thread(target=run_agent_loop, daemon=True)
     agent_thread.start()
     yield
-    # Shutdown logic if any
     print("[Sentinel API] Shutting down.")
 
 
-# ==========================================
-# FASTAPI APPLICATION & ROUTING
-# ==========================================
-app = FastAPI(
-    title="DSE Sentinel API",
-    version="0.2.0",
-    lifespan=lifespan,
-)
-
+app = FastAPI(title="DSE Sentinel API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "service": "dse-sentinel-api",
-    }
+    return {"status": "ok", "service": "dse-sentinel-api"}
 
 
 @app.get("/api/system")
@@ -618,34 +414,21 @@ def processes():
 
 @app.get("/api/services")
 def services():
-    return {
-        "systemd": get_systemd_services(),
-        "pm2": get_pm2_processes(),
-    }
+    return {"systemd": get_systemd_services(), "pm2": get_pm2_processes()}
 
 
 @app.get("/api/network")
 def network():
-    return {
-        "network": get_network_info(),
-        "listening_ports": get_listening_ports(),
-    }
+    return {"network": get_network_info(), "listening_ports": get_listening_ports()}
+
 
 @app.post("/api/test-email")
 def test_email():
     test_incident = {
-        "id": "manual-email-test",
-        "title": "Sentinel Email Test",
-        "severity": "critical",
-        "source": "manual",
-        "timestamp": time.time(),
+        "id": "manual-email-test", "title": "Sentinel Email Test",
+        "severity": "critical", "source": "manual", "timestamp": time.time(),
     }
-
-    success = email_notifier.send_incident(test_incident)
-
-    return {
-        "success": success
-    }
+    return {"success": email_notifier.send_incident(test_incident)}
 
 
 @app.get("/api/applications")
@@ -665,19 +448,12 @@ def overview():
     systemd_svcs = get_systemd_services()
     pm2_svcs = get_pm2_processes()
     listening = get_listening_ports()
-
     return {
         "system": sys_info,
         "applications": apps_info,
         "deployments": collect_deployment_state(),
-        "services": {
-            "systemd": systemd_svcs,
-            "pm2": pm2_svcs,
-        },
-        "network": {
-            "listening_ports": listening,
-        },
-        # Pass listening directly at the root of overview for frontend compatibility:
+        "services": {"systemd": systemd_svcs, "pm2": pm2_svcs},
+        "network": {"listening_ports": listening},
         "listening_ports": listening,
         "incidents": {
             "active": latest_agent_data.get("active_incidents", []),
@@ -685,9 +461,8 @@ def overview():
             "history": latest_agent_data.get("history", []),
         },
         "journal": latest_agent_data.get("journal", {}),
-        "process_baselines": {
-         "mia-web": mia_process_monitor.get_status()
-         },
+        "process_baselines": {"mia-web": mia_process_monitor.get_status()},
+        "controlled_services": list(CONTROLLED_SERVICES.keys()),
     }
 
 
@@ -696,20 +471,15 @@ def service_action(service_name: str, action: str = Query(...)):
     return run_controlled_service(service_name, action)
 
 
-# ==========================================
-# DRILL-DOWN ENDPOINTS
-# ==========================================
-
 @app.get("/api/services/{service_name}/logs")
 def get_service_logs(service_name: str, lines: int = 50):
     clean_name = "".join(c for c in service_name if c.isalnum() or c in "._-")
     try:
-        cmd = ["journalctl", "-u", clean_name, "-n", str(lines), "--no-pager"]
-        output = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-        return {
-            "service": clean_name,
-            "logs": [line for line in output.strip().split("\n") if line],
-        }
+        output = subprocess.check_output(
+            ["journalctl", "-u", clean_name, "-n", str(lines), "--no-pager"],
+            text=True, stderr=subprocess.STDOUT,
+        )
+        return {"service": clean_name, "logs": [line for line in output.strip().split("\n") if line]}
     except Exception as exc:
         return {"service": clean_name, "error": str(exc), "logs": []}
 
@@ -718,16 +488,11 @@ def get_service_logs(service_name: str, lines: int = 50):
 def get_service_stats(service_name: str):
     clean_name = "".join(c for c in service_name if c.isalnum() or c in "._-")
     try:
-        cmd = [
-            "systemctl",
-            "show",
-            clean_name,
-            "--property=NRestarts,ActiveState,SubState,MainPID,ExecMainStatus",
-        ]
-        output = subprocess.check_output(cmd, text=True)
-        props = dict(
-            line.split("=", 1) for line in output.strip().split("\n") if "=" in line
+        output = subprocess.check_output(
+            ["systemctl", "show", clean_name, "--property=NRestarts,ActiveState,SubState,MainPID,ExecMainStatus"],
+            text=True,
         )
+        props = dict(line.split("=", 1) for line in output.strip().split("\n") if "=" in line)
         return {
             "service": clean_name,
             "restarts_crashes": int(props.get("NRestarts", 0)),
@@ -739,45 +504,30 @@ def get_service_stats(service_name: str):
         return {"service": clean_name, "error": str(exc), "restarts_crashes": 0}
 
 
-
 @app.post("/api/mobile/{app_name}/build")
 def mobile_build(app_name: str, deploy: bool = False):
     if app_name not in MOBILE_APPS:
         raise HTTPException(status_code=404, detail="Unknown mobile app")
-
+    with mobile_jobs_lock:
+        if any(job.get("status") in {"queued", "running"} and job.get("app") == app_name for job in mobile_jobs.values()):
+            raise HTTPException(status_code=409, detail=f"A build is already running for {app_name}")
     job_id = f"{app_name.lower().replace(' ', '-')}-{int(time.time())}"
-
     with mobile_jobs_lock:
         mobile_jobs[job_id] = {
-            "id": job_id,
-            "app": app_name,
-            "deploy": deploy,
-            "status": "queued",
-            "started_at": time.time(),
+            "id": job_id, "app": app_name, "deploy": deploy,
+            "status": "queued", "started_at": time.time(),
         }
-
-    thread = threading.Thread(
-        target=run_mobile_job,
-        args=(job_id, app_name, deploy),
-        daemon=True,
-    )
+    thread = threading.Thread(target=run_mobile_job, args=(job_id, app_name, deploy), daemon=True)
     thread.start()
-
-    return {
-        "success": True,
-        "job_id": job_id,
-        "status": "queued",
-    }
+    return {"success": True, "job_id": job_id, "status": "queued", "deploy": deploy}
 
 
 @app.get("/api/mobile/jobs/{job_id}")
 def mobile_job(job_id: str):
     with mobile_jobs_lock:
         job = mobile_jobs.get(job_id)
-
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
     return job
 
 
