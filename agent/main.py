@@ -21,14 +21,16 @@ COLLECTION_INTERVAL = 5
 UNIT_MAP = {
     "Sentinel API": "dse-sentinel-api.service",
     "Sentinel Web": "sentinel-web.service",
-    #"SeaVie Web": "seavie-web.service",
-    "SeaVie API": "seavie-api.service",
+     "SeaVie API": "seavie-api.service",
     "MIA Web": "mia-web",
     "MIA API":"mia-api.service",
+    "Apex Marine API": "apex-api.service",
 }
 
 CONTROLLED_SERVICES = {
-    "MIA Web": {"type": "pm2", "pm2_name": "mia-web"},
+    "MIA Web": {
+        "type": "pm2", 
+        "pm2_name": "mia-web"},
     "MIA API": {
         "type": "systemd",
         "unit": "mia-api.service",
@@ -37,7 +39,9 @@ CONTROLLED_SERVICES = {
         "type": "systemd",
         "unit": "seavie-api.service",
     },
-  #  "SeaVie Web": {"type": "pm2", "pm2_name": "seavie-web"},
+    "Apex Marine API": {
+        "type": "systemd",
+         "unit": "apex-api.service"},
     "Sentinel API": {
     "type": "systemd",
     "unit": "dse-sentinel-api.service",
@@ -46,11 +50,14 @@ CONTROLLED_SERVICES = {
     "unit": "sentinel-web.service"
     },
     
-  "VS Code Console":
-  {"type": "systemd",
+ }
+
+CONTROLLED_APPLICATIONS = {
+     "VS Code Console":
+  {"type": "user-systemd",
   "unit": "code-server.service",
-},
-}
+},  
+ }
 
 MOBILE_APPS = {
     "MIA Mobile": {
@@ -294,9 +301,18 @@ def collect_deployment_state() -> Dict[str, Any]:
 def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
     """
     Execute a strictly allow-listed service control action.
-    Never pass arbitrary user input to a shell.
+
+    Supports:
+      - PM2 services
+      - system-level systemd services
+      - user-level systemd services such as code-server
+
+    Never passes arbitrary user input to a shell.
     """
+
     service = CONTROLLED_SERVICES.get(service_name)
+    if not service:
+        service =CONTROLLED_APPLICATIONS.get(service_name)
 
     if not service:
         raise HTTPException(
@@ -311,28 +327,43 @@ def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
         )
 
     try:
-        if service["type"] == "pm2":
+        service_type = service["type"]
+        unit = service.get("unit")
+
+        if service_type == "pm2":
             command = [
                 "/home/mainsup/.nvm/versions/node/v24.18.1/bin/pm2",
                 action,
                 service["pm2_name"],
             ]
 
-        elif service["type"] == "systemd":
+        elif service_type == "systemd":
             command = [
                 "sudo",
                 "-n",
                 "/usr/bin/systemctl",
                 action,
-                service["unit"],
+                unit,
             ]
-        elif service["type"] == "user-systemd":
+
+        elif service_type == "user-systemd":
             command = [
+        "sudo",
+        "-n",
+        "-u",
+        "mainsup",
         "systemctl",
         "--user",
         action,
-        service["unit"],
-         ]
+        unit,
+          ]
+
+            env = {
+            **os.environ,
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "DBUS_SESSION_BUS_ADDRESS":
+            "unix:path=/run/user/1000/bus",
+         }
 
         else:
             raise HTTPException(
@@ -341,18 +372,19 @@ def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
             )
 
         result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+    command,
+    capture_output=True,
+    text=True,
+    timeout=30,
+    check=False,
+    env=env if "env" in locals() else None,
+)
 
         return {
             "success": result.returncode == 0,
             "service": service_name,
             "action": action,
-            "manager": service["type"],
+            "manager": service_type,
             "stdout": result.stdout[-4000:],
             "stderr": result.stderr[-4000:],
             "return_code": result.returncode,
@@ -363,6 +395,143 @@ def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
             status_code=504,
             detail=f"{action} operation timed out",
         )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+
+def get_code_server_status() -> Dict[str, Any]:
+    """
+    Return the actual code-server systemd status.
+
+    Prefer the system-level service. If it does not exist,
+    fall back to the mainsup user-level service.
+    """
+
+    unit = "code-server.service"
+
+    # First check system-level systemd.
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "show",
+                unit,
+                "--property=LoadState,ActiveState,SubState,MainPID",
+                "--no-pager",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+        props = {}
+
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                props[key] = value
+
+        if props.get("LoadState") == "loaded":
+            active = props.get("ActiveState", "unknown")
+
+            if active == "active":
+                status = "online"
+            elif active == "failed":
+                status = "failed"
+            elif active in {"inactive", "deactivating"}:
+                status = "stopped"
+            else:
+                status = "unknown"
+
+            return {
+                "success": True,
+                "service": "code-server",
+                "unit": unit,
+                "manager": "systemd",
+                "status": status,
+                "active_state": active,
+                "sub_state": props.get("SubState", "unknown"),
+                "pid": int(props.get("MainPID", "0") or 0),
+            }
+
+    except Exception:
+        pass
+
+    # Fall back to mainsup user-level systemd.
+    try:
+        result = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                "-u",
+                "mainsup",
+                "systemctl",
+                "--user",
+                "show",
+                unit,
+                "--property=LoadState,ActiveState,SubState,MainPID",
+                "--no-pager",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env={
+                **os.environ,
+                "XDG_RUNTIME_DIR": "/run/user/1000",
+                "DBUS_SESSION_BUS_ADDRESS":
+                    "unix:path=/run/user/1000/bus",
+            },
+        )
+
+        props = {}
+
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                props[key] = value
+
+        if props.get("LoadState") == "loaded":
+            active = props.get("ActiveState", "unknown")
+
+            if active == "active":
+                status = "online"
+            elif active == "failed":
+                status = "failed"
+            elif active in {"inactive", "deactivating"}:
+                status = "stopped"
+            else:
+                status = "unknown"
+
+            return {
+                "success": True,
+                "service": "code-server",
+                "unit": unit,
+                "manager": "user-systemd",
+                "status": status,
+                "active_state": active,
+                "sub_state": props.get("SubState", "unknown"),
+                "pid": int(props.get("MainPID", "0") or 0),
+            }
+
+    except Exception:
+        pass
+
+    return {
+        "success": False,
+        "service": "code-server",
+        "unit": unit,
+        "status": "unknown",
+        "active_state": "unknown",
+        "sub_state": "unknown",
+        "pid": 0,
+    }
+
 
 
 class JournalCollector:
@@ -644,12 +813,42 @@ def overview():
         "journal": latest_agent_data.get("journal", {}),
         "process_baselines": {"mia-web": mia_process_monitor.get_status()},
         "controlled_services": list(CONTROLLED_SERVICES.keys()),
+
     }
 
 
 @app.post("/api/services/{service_name}/action")
 def service_action(service_name: str, action: str = Query(...)):
     return run_controlled_service(service_name, action)
+
+
+@app.get("/api/code-server/status")
+def code_server_status():
+    return get_code_server_status()
+
+
+@app.post("/api/code-server/action")
+def code_server_action(action: str = Query(...)):
+    if action not in {"start", "stop", "restart"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported action: {action}",
+        )
+
+    result = run_controlled_service(
+        "VS Code Console",
+        action,
+    )
+
+    # Return the new status after the operation.
+    time.sleep(0.5)
+
+    status = get_code_server_status()
+
+    return {
+        **result,
+        "status": status,
+    }
 
 
 @app.get("/api/services/{service_name}/logs")
