@@ -19,10 +19,12 @@ load_dotenv()
 COLLECTION_INTERVAL = 5
 
 UNIT_MAP = {
-    "Sentinel API": "sentinel-api.service",
+    "Sentinel API": "dse-sentinel-api.service",
     "Sentinel Web": "sentinel-web.service",
-    "SeaVie Web": "seavie-web.service",
+    #"SeaVie Web": "seavie-web.service",
     "SeaVie API": "seavie-api.service",
+    "MIA Web": "mia-web",
+    "MIA API":"mia-api.service",
 }
 
 CONTROLLED_SERVICES = {
@@ -349,7 +351,7 @@ def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
             status_code=504,
             detail=f"{action} operation timed out",
         )
-        
+
 
 class JournalCollector:
     def collect(self, lines: int = 50) -> Dict[str, Any]:
@@ -435,6 +437,10 @@ mia_process_monitor = ProcessBaselineMonitor(
     cwd="/home/mainsup/projects/MIA/mia-web/mia-web-app",
 )
 
+# Prevent repeated journal-high-errors emails after Sentinel restarts.
+# This state is intentionally kept outside IncidentManager because
+# IncidentManager is reset whenever the API process restarts.
+journal_error_email_sent = False
 
 def run_agent_loop():
     global latest_agent_data
@@ -460,9 +466,29 @@ def run_agent_loop():
                 detections.append(mia_memory["incident"])
             previous_incident_ids = set(incident_manager.active_incidents.keys())
             incident_events = incident_manager.process(detections)
+
             for incident in incident_events:
-                if incident.get("id") not in previous_incident_ids:
+                incident_id = incident.get("id")
+
+                # Journal errors are noisy and can survive Sentinel restarts.
+                # Send the email only once while the condition remains active.
+                if incident_id == "journal-high-errors":
+                    global journal_error_email_sent
+
+                    if not journal_error_email_sent:
+                        email_notifier.send_incident(incident)
+                        journal_error_email_sent = True
+
+           # All other incidents keep the normal "new incident" behavior.
+                elif incident_id not in previous_incident_ids:
                     email_notifier.send_incident(incident)
+
+             # Reset the journal email lock once the journal condition clears.
+            if not any(
+                incident.get("id") == "journal-high-errors"
+                for incident in incident_events
+            ):
+                journal_error_email_sent = False
             latest_agent_data = {
                 "active_incidents": incident_manager.get_active(),
                 "events": incident_events,
