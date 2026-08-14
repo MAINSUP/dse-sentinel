@@ -45,6 +45,11 @@ CONTROLLED_SERVICES = {
     "Sentinel Web": {"type": "systemd", 
     "unit": "sentinel-web.service"
     },
+    
+  "VS Code Console":
+  {"type": "systemd",
+  "unit": "code-server.service",
+},
 }
 
 MOBILE_APPS = {
@@ -321,6 +326,13 @@ def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
                 action,
                 service["unit"],
             ]
+        elif service["type"] == "user-systemd":
+            command = [
+        "systemctl",
+        "--user",
+        action,
+        service["unit"],
+         ]
 
         else:
             raise HTTPException(

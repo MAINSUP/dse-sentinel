@@ -10,7 +10,6 @@ SERVICE_MAP: Dict[str, Dict[str, Any]] = {
     "seavie-api": {"label": "SeaVie API", "kind": "systemd", "unit": "seavie-api.service", "actions": ["start", "stop", "restart"]},
     "mia-web": {"label": "MIA Web", "kind": "pm2", "process": "mia-web", "actions": ["start", "stop", "restart"]},
     "mia-mobile": {"label": "MIA Mobile", "kind": "eas", "directory": "/home/mainsup/projects/MIA/mobile", "actions": ["build"]},
-    "code-server": {"label": "VS Code Console", "kind": "user-systemd", "unit": "code-server.service", "actions": ["start", "stop", "restart"]},
 }
 
 PM2 = "/home/mainsup/.nvm/versions/node/v24.18.1/bin/pm2"
@@ -37,11 +36,6 @@ def control_service(request: ServiceAction):
 
     if target["kind"] == "systemd":
         result = run(["systemctl", request.action, target["unit"]])
-    elif target["kind"] == "user-systemd":
-        result = run(
-            ["systemctl", "--user", request.action, target["unit"]],
-            cwd="/home/mainsup",
-        )
     elif target["kind"] == "pm2":
         result = run([PM2, request.action, target["process"]])
     else:
