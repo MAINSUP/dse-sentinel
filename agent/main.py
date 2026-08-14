@@ -357,13 +357,34 @@ class JournalCollector:
     def collect(self, lines: int = 50) -> Dict[str, Any]:
         try:
             output = subprocess.check_output(
-                ["journalctl", "-p", "3", "-n", str(lines), "--no-pager", "-o", "json"],
+                [
+                    "journalctl",
+                    "-p", "3",
+                    "--since", "10 minutes ago",
+                    "-n", str(lines),
+                    "--no-pager",
+                    "-o", "json",
+                ],
                 text=True,
             )
-            entries = [json.loads(line) for line in output.strip().split("\n") if line]
-            return {"errors_count": len(entries), "entries": entries}
-        except Exception:
-            return {"errors_count": 0, "entries": []}
+
+            entries = [
+                json.loads(line)
+                for line in output.strip().split("\n")
+                if line
+            ]
+
+            return {
+                "errors_count": len(entries),
+                "entries": entries,
+            }
+
+        except Exception as exc:
+            print(f"[JournalCollector] {exc}")
+            return {
+                "errors_count": 0,
+                "entries": [],
+            }
 
 
 class DetectionEngine:
@@ -387,12 +408,41 @@ def check_listening_ports(ports):
 
 
 def check_journal_errors(journal):
-    if journal.get("errors_count", 0) > 10:
+    """
+    Detect unusually high system journal error frequency while ignoring
+    known low-value SSH connection-reset noise.
+    """
+    entries = journal.get("entries", [])
+
+    relevant_errors = []
+
+    for entry in entries:
+        message = str(
+            entry.get("MESSAGE")
+            or entry.get("message")
+            or ""
+        ).lower()
+
+        # Ignore common internet/SSH scanning noise.
+        if "kex_exchange_identification" in message:
+            continue
+
+        if "connection reset by peer" in message and (
+            "sshd" in message or "sshd-session" in message
+        ):
+            continue
+
+        relevant_errors.append(entry)
+
+    if len(relevant_errors) > 10:
         return [{
             "id": "journal-high-errors",
             "title": "High system log error frequency detected",
-            "severity": "warning", "source": "journalctl", "timestamp": time.time(),
+            "severity": "warning",
+            "source": "journalctl",
+            "timestamp": time.time(),
         }]
+
     return []
 
 
