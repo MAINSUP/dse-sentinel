@@ -202,7 +202,7 @@ def get_systemd_services() -> List[Dict[str, Any]]:
 
 def get_pm2_processes() -> List[Dict[str, Any]]:
     try:
-        output = subprocess.check_output(["pm2", "jlist"], text=True)
+        output = subprocess.check_output(["/home/mainsup/.nvm/versions/node/v24.18.1/bin/pm2", "jlist"], text=True)
         data = json.loads(output)
         return [{
             "name": p.get("name"),
