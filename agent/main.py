@@ -348,22 +348,20 @@ def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
 
         elif service_type == "user-systemd":
             command = [
-        "sudo",
-        "-n",
-        "-u",
-        "mainsup",
-        "systemctl",
+        "/usr/bin/systemctl",
         "--user",
         action,
         unit,
-          ]
+    ]
 
             env = {
-            **os.environ,
+        **os.environ,
+        "HOME": "/home/mainsup",
+        "USER": "mainsup",
+        "LOGNAME": "mainsup",
         "XDG_RUNTIME_DIR": "/run/user/1000",
-        "DBUS_SESSION_BUS_ADDRESS":
-            "unix:path=/run/user/1000/bus",
-         }
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+    }
 
         else:
             raise HTTPException(
@@ -372,12 +370,26 @@ def run_controlled_service(service_name: str, action: str) -> Dict[str, Any]:
             )
 
         result = subprocess.run(
-    command,
+    [
+        "/usr/bin/systemctl",
+        "--user",
+        "show",
+        unit,
+        "--property=LoadState,ActiveState,SubState,MainPID",
+        "--no-pager",
+    ],
     capture_output=True,
     text=True,
-    timeout=30,
+    timeout=10,
     check=False,
-    env=env if "env" in locals() else None,
+    env={
+        **os.environ,
+        "HOME": "/home/mainsup",
+        "USER": "mainsup",
+        "LOGNAME": "mainsup",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+    },
 )
 
         return {
